@@ -381,7 +381,6 @@ void put(R, E)(ref R r, E e)
     }
     //Optional optimization block for straight up array to array copy.
     else static if (isDynamicArray!R &&
-                    !isAutodecodableString!R &&
                     isDynamicArray!E &&
                     is(typeof(r[] = e[])))
     {
@@ -409,21 +408,8 @@ void put(R, E)(ref R r, E e)
     //We can use "put" here, so we can recursively test a RoR of E.
     else static if (isInputRange!E && is(typeof(put(r, e.front))))
     {
-        //Special optimization: If E is a narrow string, and r accepts characters no-wider than the string's
-        //Then simply feed the characters 1 by 1.
-        static if (isAutodecodableString!E && !isAggregateType!E && (
-            (is(E : const  char[]) && is(typeof(doPut(r,  char.max))) && !is(typeof(doPut(r, dchar.max))) &&
-                !is(typeof(doPut(r, wchar.max)))) ||
-            (is(E : const wchar[]) && is(typeof(doPut(r, wchar.max))) && !is(typeof(doPut(r, dchar.max)))) ) )
-        {
-            foreach (c; e)
-                doPut(r, c);
-        }
-        else
-        {
-            for (; !e.empty; e.popFront())
-                put(r, e.front);
-        }
+		for (; !e.empty; e.popFront())
+			put(r, e.front);
     }
     else
     {
@@ -1094,7 +1080,6 @@ See_Also:
  */
 enum bool isRandomAccessRange(R) =
     is(typeof(lvalueOf!R[1]) == ElementType!R)
-    && !(isAutodecodableString!R && !isAggregateType!R)
     && isForwardRange!R
     && (isBidirectionalRange!R || isInfinite!R)
     && (hasLength!R || isInfinite!R)
@@ -1104,7 +1089,7 @@ enum bool isRandomAccessRange(R) =
 ///
 @safe unittest
 {
-    import std.traits : isAggregateType, isAutodecodableString;
+    import std.traits : isAggregateType;
 
     alias R = int[];
 
@@ -1116,7 +1101,6 @@ enum bool isRandomAccessRange(R) =
     auto e = r[1]; // can index
     auto f = r.front;
     static assert(is(typeof(e) == typeof(f))); // same type for indexed and front
-    static assert(!(isAutodecodableString!R && !isAggregateType!R)); // narrow strings cannot be indexed as ranges
     static assert(hasLength!R || isInfinite!R); // must have length or be infinite
 
     // $ must work as it does with arrays if opIndex works with $
@@ -1564,8 +1548,7 @@ length, use $(REF representation, std, string) or $(REF byCodeUnit, std, utf).
 template hasLength(R)
 {
     static if (is(typeof(((R* r) => r.length)(null)) Length))
-        enum bool hasLength = is(Length == size_t) &&
-                              !(isAutodecodableString!R && !isAggregateType!R);
+        enum bool hasLength = is(Length == size_t);
     else
         enum bool hasLength = false;
 }
@@ -1676,7 +1659,6 @@ The following expression must be true for `hasSlicing` to be `true`:
 ----
  */
 enum bool hasSlicing(R) = isForwardRange!R
-    && !(isAutodecodableString!R && !isAggregateType!R)
     && is(ReturnType!((R r) => r[1 .. 1].length) == size_t)
     && (is(typeof(lvalueOf!R[1 .. 1]) == R) || isInfinite!R)
     && (!is(typeof(lvalueOf!R[0 .. $])) || is(typeof(lvalueOf!R[0 .. $]) == R))
@@ -1760,20 +1742,6 @@ if (isInputRange!Range && !isInfinite!Range)
     else
     {
         size_t result;
-        static if (autodecodeStrings && isNarrowString!Range)
-        {
-            import std.utf : codeUnitLimit;
-            result = range.length;
-            foreach (const i, const c; range)
-            {
-                if (c >= codeUnitLimit!Range)
-                {
-                    result = i;
-                    break;
-                }
-            }
-            range = range[result .. $];
-        }
         for ( ; !range.empty ; range.popFront() )
             ++result;
         return result;
@@ -1790,20 +1758,6 @@ if (isInputRange!Range)
     else
     {
         size_t result;
-        static if (autodecodeStrings && isNarrowString!Range)
-        {
-            import std.utf : codeUnitLimit;
-            result = upTo > range.length ? range.length : upTo;
-            foreach (const i, const c; range[0 .. result])
-            {
-                if (c >= codeUnitLimit!Range)
-                {
-                    result = i;
-                    break;
-                }
-            }
-            range = range[result .. $];
-        }
         for ( ; result < upTo && !range.empty ; range.popFront() )
             ++result;
         return result;
@@ -2275,7 +2229,7 @@ equivalent to `popFront(array)`. For $(GLOSSARY narrow strings),
 point).
 */
 void popFront(T)(scope ref inout(T)[] a) @safe pure nothrow @nogc
-if (!isAutodecodableString!(T[]) && !is(T[] == void[]))
+if (!is(T[] == void[]))
 {
     assert(a.length, "Attempting to popFront() past the end of an array of " ~ T.stringof);
     a = a[1 .. $];
@@ -2294,36 +2248,6 @@ if (!isAutodecodableString!(T[]) && !is(T[] == void[]))
     static assert(!is(typeof({          int[4] a; popFront(a); })));
     static assert(!is(typeof({ immutable int[] a; popFront(a); })));
     static assert(!is(typeof({          void[] a; popFront(a); })));
-}
-
-/// ditto
-void popFront(C)(scope ref inout(C)[] str) @trusted pure nothrow
-if (isAutodecodableString!(C[]))
-{
-    import std.algorithm.comparison : min;
-
-    assert(str.length, "Attempting to popFront() past the end of an array of " ~ C.stringof);
-
-    static if (is(immutable C == immutable char))
-    {
-        static immutable ubyte[] charWidthTab = [
-            2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-            2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-            3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-            4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 1, 1
-        ];
-
-        immutable c = str[0];
-        immutable charWidth = c < 192 ? 1 : charWidthTab.ptr[c - 192];
-        str = str.ptr[min(str.length, charWidth) .. str.length];
-    }
-    else static if (is(immutable C == immutable wchar))
-    {
-        immutable u = str[0];
-        immutable seqLen = 1 + (u >= 0xD800 && u <= 0xDBFF);
-        str = str.ptr[min(seqLen, str.length) .. str.length];
-    }
-    else static assert(0, "Bad template constraint.");
 }
 
 @safe pure unittest
@@ -2390,7 +2314,7 @@ equivalent to `popBack(array)`. For $(GLOSSARY narrow strings), $(D
 popFront) automatically eliminates the last $(GLOSSARY code point).
 */
 void popBack(T)(scope ref inout(T)[] a) @safe pure nothrow @nogc
-if (!isAutodecodableString!(T[]) && !is(T[] == void[]))
+if (!is(T[] == void[]))
 {
     assert(a.length);
     a = a[0 .. $ - 1];
@@ -2409,15 +2333,6 @@ if (!isAutodecodableString!(T[]) && !is(T[] == void[]))
     static assert(!is(typeof({ immutable int[] a; popBack(a); })));
     static assert(!is(typeof({          int[4] a; popBack(a); })));
     static assert(!is(typeof({          void[] a; popBack(a); })));
-}
-
-/// ditto
-void popBack(T)(scope ref inout(T)[] a) @safe pure
-if (isAutodecodableString!(T[]))
-{
-    import std.utf : strideBack;
-    assert(a.length, "Attempting to popBack() past the front of an array of " ~ T.stringof);
-    a = a[0 .. $ - strideBack(a, $)];
 }
 
 @safe pure unittest
@@ -2448,20 +2363,7 @@ if (isAutodecodableString!(T[]))
     }}
 }
 
-/**
-EXPERIMENTAL: to try out removing autodecoding, set the version
-`NoAutodecodeStrings`. Most things are expected to fail with this version
-currently.
-*/
-version (NoAutodecodeStrings)
-{
-    enum autodecodeStrings = false;
-}
-else
-{
-    ///
-    enum autodecodeStrings = true;
-}
+enum autodecodeStrings = false;
 
 /**
 Implements the range interface primitive `front` for built-in
@@ -2472,7 +2374,7 @@ front) automatically returns the first $(GLOSSARY code point) as _a $(D
 dchar).
 */
 @property ref inout(T) front(T)(return scope inout(T)[] a) @safe pure nothrow @nogc
-if (!isAutodecodableString!(T[]) && !is(T[] == void[]))
+if (!is(T[] == void[]))
 {
     assert(a.length, "Attempting to fetch the front of an empty array of " ~ T.stringof);
     return a[0];
@@ -2499,16 +2401,6 @@ if (!isAutodecodableString!(T[]) && !is(T[] == void[]))
     assert(c.front == 1);
 }
 
-/// ditto
-@property dchar front(T)(scope const(T)[] a) @safe pure
-if (isAutodecodableString!(T[]))
-{
-    import std.utf : decode;
-    assert(a.length, "Attempting to fetch the front of an empty array of " ~ T.stringof);
-    size_t i = 0;
-    return decode(a, i);
-}
-
 /**
 Implements the range interface primitive `back` for built-in
 arrays. Due to the fact that nonmember functions can be called with
@@ -2518,7 +2410,7 @@ back) automatically returns the last $(GLOSSARY code point) as _a $(D
 dchar).
 */
 @property ref inout(T) back(T)(return scope inout(T)[] a) @safe pure nothrow @nogc
-if (!isAutodecodableString!(T[]) && !is(T[] == void[]))
+if (!is(T[] == void[]))
 {
     assert(a.length, "Attempting to fetch the back of an empty array of " ~ T.stringof);
     return a[$ - 1];
@@ -2540,17 +2432,6 @@ if (!isAutodecodableString!(T[]) && !is(T[] == void[]))
 
     int[3] c = [ 1, 2, 3 ];
     assert(c.back == 3);
-}
-
-/// ditto
-// Specialization for strings
-@property dchar back(T)(scope const(T)[] a) @safe pure
-if (isAutodecodableString!(T[]))
-{
-    import std.utf : decode, strideBack;
-    assert(a.length, "Attempting to fetch the back of an empty array of " ~ T.stringof);
-    size_t i = a.length - strideBack(a, a.length);
-    return decode(a, i);
 }
 
 /*
